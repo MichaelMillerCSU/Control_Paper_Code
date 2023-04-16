@@ -1,0 +1,238 @@
+clc
+clear
+close all
+global A;
+global B;
+global s;
+global W_Set;
+global epsilon;
+global K;
+A = [1 1;
+     0 1];
+
+B = [0.5;
+     1];
+
+% INF = 1e3;
+
+W_Vertex = [0.1 0.1;
+           -0.1 0.1;
+           -0.1 -0.1;
+           0.1 -0.1];
+
+% For the simulation, it can be not that large.
+% X_Vertex = [INF, 2;
+%            -INF, 2;
+%            -INF, -INF;
+%             INF, -INF];
+X_Vertex = [4, 2;
+           -10, 2;
+           -10, -3;
+            4, -3];
+
+U_Vertex = [1;
+            -1];
+
+W_Set = Polyhedron(W_Vertex);
+X_Constraints = Polyhedron(X_Vertex);
+U_Constraints = Polyhedron(U_Vertex);
+
+N = 9;
+nx = 2;
+nu = 1;
+Q = eye(nx);
+R = 0.01 * eye(nu);
+
+K = -dlqr(A, B, Q, R);
+
+% P = (A+BK)'P(A+BK) + (Q + K'RK)
+P = dlyap((A+B*K)', Q+K'*R*K);
+x0 = [-5; -2];
+
+%% Approximation of maximal disturbance invariant set $\mathbfcal{Z}$
+
+epsilon = 1e-4;
+s = 0;
+
+while 1
+    s = s + 1;
+    alpha = getAlpha();
+    Ms = getMs();
+    if alpha <= epsilon / (epsilon + Ms)
+        break;
+    end
+end
+
+Fs = W_Set;
+for i = 1 : s
+    Fs = Fs + (A + B * K)^i * W_Set;
+end
+Z = 1 / (1 - alpha) * Fs;
+
+
+%% Construct the terminal constraint of the state
+
+X_Robust = X_Constraints - Z;
+U_Robust = U_Constraints - K*Z;
+A1 = X_Robust.A;
+A2 = U_Robust.A;
+b1 = X_Robust.b;
+b2 = U_Robust.b;
+F = [A1; zeros(size(A2, 1), nx)];
+G = [zeros(size(A1, 1), nu); A2];
+FG = [b1; b2];
+Y = @(i) Polyhedron((F+G*K) * (A + B*K)^i, FG);
+
+t = 0;
+Y0 = Y(t);
+while 1
+    t = t + 1;
+    Y_temp = and(Y0, Y(t));
+    if Y_temp == Y0
+        break;
+    else
+        Y0 = Y_temp;
+    end
+end
+
+Xf = Y0;
+
+%% Construct the constraints matrix A X <= b, X = [\bar{x0}, v0, v1, ..., vN]^T
+
+%% x0 \in \bar{x0} \oplus Z
+X_Constraint_Init = x0 + Z;
+
+A_X_Constraint_Init = X_Constraint_Init.A * [eye(nx), zeros(nx, N * nu)];
+b_X_Constraint_Init = X_Constraint_Init.b;
+
+%% x \in X_Constraints 
+% Compact form predicted matrix, 
+% [\bar{x0}, ..., \bar{xN}]^T = [I; A; ...; A^N]*[0 0 ... 0; B 0 0 ...
+% 0;...; A^N-1 B, A^N-2 B, ..., B]X
+
+Compact_Form1 = [];
+for i = 1 : N + 1
+    Compact_Form1 = [Compact_Form1; A^(i - 1)];
+end
+Shift_Matrix = kron([zeros(1, N); [eye(N - 1) zeros(N - 1, 1)]], eye(nu));
+Compact_Form2 = [];
+for i = 1 : N + 1
+    vector_Temp = [];
+    for j = 1 : N
+        vector_Temp = [A^(j - 1)*B  vector_Temp];
+    end
+    Compact_Form2 = [vector_Temp * Shift_Matrix^(i - 1); Compact_Form2];
+end
+Compact_Form = [Compact_Form1 Compact_Form2];
+
+A_X_Constraints = kron(eye(N + 1), X_Robust.A) * Compact_Form;
+b_X_Constraints = kron(ones(N + 1, 1), X_Robust.b);
+
+%% u \in U_Constraints
+% Select v(0), v(1), ..., v(N - 1)
+v_Select = [zeros(N * nu, nx) kron(eye(N), eye(nu))];
+A_U_Constraints = kron(eye(N), U_Robust.A) * v_Select;
+b_U_Constraints = kron(ones(N, 1), U_Robust.b);
+
+%% x_N \in X_f
+terminal_Vector = Compact_Form(end - nx + 1 : end, :);
+A_Terminal_Constraints = Xf.A * terminal_Vector;
+b_Terminal_Constraints = Xf.b;
+
+
+
+%% Construct the cost function
+
+X_State_Cost = kron(eye(N), Q);
+X_Terminal_Cost = P;
+X_Cost = [X_State_Cost zeros(size(X_State_Cost, 1), nx);
+          zeros(nx, size(X_State_Cost, 2)) P];
+
+U_Cost = kron(eye(N), R);
+
+H = Compact_Form' * X_Cost * Compact_Form + v_Select' * U_Cost * v_Select;
+% H = 2.*H;
+f = zeros(nx + N * nu, 1);
+step_Max = 15;
+X_Record = [x0];
+X0_Record = [];
+x_next = x0;
+figure
+for i = 1 : step_Max
+    % Reconstruct the initial constraint
+    x0 = x_next;
+    X_Constraint_Init = x0 + Z;
+    A_X_Constraint_Init = X_Constraint_Init.A * [eye(nx), zeros(nx, N * nu)];
+    b_X_Constraint_Init = X_Constraint_Init.b;
+    A_Ineq_Constraints = [A_X_Constraint_Init;
+                          A_X_Constraints;
+                          A_U_Constraints;
+                          A_Terminal_Constraints];
+    b_Ineq_Constraints = [b_X_Constraint_Init;
+                          b_X_Constraints;
+                          b_U_Constraints;
+                          b_Terminal_Constraints];
+
+
+    res = quadprog(H, f, A_Ineq_Constraints, b_Ineq_Constraints);
+    x0_Star = res(1:nx, 1);
+    P_Z = plot_Set(x0_Star + Z, [0.4660 0.6740 0.1880], 3);
+    v_Solved = res(nx + 1 : nx + nu, 1);
+    u_Designed = v_Solved + K * (x0 - x0_Star);
+
+    w = 0.1 * rand(nx, 1);
+    x_next = A*x_next + B*u_Designed + w;
+    X_Record = [X_Record, x_next];
+    X0_Record = [X0_Record, x0_Star];
+end
+
+P_X_Record = plot(X_Record(1, :), X_Record(2, :), 'color', [0 0.4470 0.7410], 'LineWidth', 2, 'LineStyle', '--');
+hold on
+P_X0_Record = plot(X0_Record(1, :), X0_Record(2, :), 'color', [0.8500 0.3250 0.0980], 'LineWidth', 2, 'LineStyle', '-');
+hold on
+P_Xf = plot_Set(Xf, [0.9290 0.6940 0.1250], 3);
+hold on
+P_Xf_Z = plot_Set(Xf + Z, [0.4940 0.1840 0.5560], 3);
+legend([P_Z P_X_Record P_X0_Record P_Xf P_Xf_Z], {'$\mathcal{Z}$', '$Real\,state\,x$', '$Nominal\,state\,\bar{x}$', '$X_f$', 'X'}, 'Interpreter','latex')
+grid on 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
