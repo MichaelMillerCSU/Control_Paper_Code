@@ -6,3 +6,5 @@
 
 1. Rakovic, Sasa V., et al. “Invariant approximations of the minimal robust positively invariant set.” IEEE Transactions on Automatic Control 50.3 (2005): 406-410.
 2. Gilbert, Elmer G., and Kok Tin Tan. "Linear systems with output constraints: The theory and application of maximal output admissible sets." 1991 American Control Conference. IEEE, 1991.
+
+会持续更新
